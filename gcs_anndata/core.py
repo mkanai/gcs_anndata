@@ -38,6 +38,8 @@ class GCSAnnData:
         self.fs = gcsfs.GCSFileSystem()
         self.obs_names = None
         self.var_names = None
+        self.obs_to_idx = None
+        self.var_to_idx = None
         self._initialize()
 
     def _initialize(self):
@@ -60,6 +62,7 @@ class GCSAnnData:
                         self.obs_names = self._decode_string_array(h5f["obs"]["index"][:])
                     elif "_index" in h5f["obs"]:
                         self.obs_names = self._decode_string_array(h5f["obs"]["_index"][:])
+                    self.obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
 
                 # Load variable names (genes)
                 if "var" in h5f:
@@ -67,10 +70,11 @@ class GCSAnnData:
                         self.var_names = self._decode_string_array(h5f["var"]["index"][:])
                     elif "_index" in h5f["var"]:
                         self.var_names = self._decode_string_array(h5f["var"]["_index"][:])
+                    self.var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
 
     def _decode_string_array(self, arr):
         """Decode byte strings to unicode if necessary."""
-        if arr.dtype.kind == "S":  # byte string
+        if arr.dtype.kind == "S" or isinstance(arr[0], bytes):  # byte string
             return np.array([s.decode("utf-8") for s in arr])
         return arr
 
@@ -128,9 +132,7 @@ class GCSAnnData:
         # Convert variable names to indices if needed
         if self.var_names is not None and isinstance(columns[0], str):
             try:
-                # Create a mapping of var_names to indices for efficient lookup
-                var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
-                column_indices = [var_to_idx[col] for col in columns]
+                column_indices = [self.var_to_idx[col] for col in columns]
             except KeyError as e:
                 raise KeyError(f"Variable name not found: {e}")
         else:
@@ -186,9 +188,7 @@ class GCSAnnData:
         # Convert observation names to indices if needed
         if self.obs_names is not None and isinstance(rows[0], str):
             try:
-                # Create a mapping of obs_names to indices for efficient lookup
-                obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
-                row_indices = [obs_to_idx[row] for row in rows]
+                row_indices = [self.obs_to_idx[row] for row in rows]
             except KeyError as e:
                 raise KeyError(f"Observation name not found: {e}")
         else:
