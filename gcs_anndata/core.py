@@ -3,8 +3,9 @@
 import h5py
 import gcsfs
 import numpy as np
+import warnings
 from scipy.sparse import csc_matrix, csr_matrix
-from typing import List, Union, Tuple, Optional
+from typing import List, Union, Tuple, Optional, Sequence
 
 from .exceptions import InvalidFormatError
 from .utils import infer_sparse_matrix_format
@@ -25,12 +26,18 @@ class GCSAnnData:
         Shape of the data matrix (n_obs, n_vars)
     sparse_format : str
         Format of the sparse matrix ('csc' or 'csr')
+    obs_names : np.ndarray
+        Names of observations (cell barcodes)
+    var_names : np.ndarray
+        Names of variables (genes)
     """
 
     def __init__(self, gcs_path: str):
         """Initialize the GCSAnnData object."""
         self.gcs_path = gcs_path
         self.fs = gcsfs.GCSFileSystem()
+        self.obs_names = None
+        self.var_names = None
         self._initialize()
 
     def _initialize(self):
@@ -47,11 +54,25 @@ class GCSAnnData:
                 # Determine sparse format
                 self.sparse_format = infer_sparse_matrix_format(h5f["X"])
 
-                # Store variable and observation names if available
-                if "var" in h5f and "index" in h5f["var"]:
-                    self.var_names = h5f["var"]["index"][:]
-                if "obs" in h5f and "index" in h5f["obs"]:
-                    self.obs_names = h5f["obs"]["index"][:]
+                # Load observation names (cell barcodes)
+                if "obs" in h5f:
+                    if "index" in h5f["obs"]:
+                        self.obs_names = self._decode_string_array(h5f["obs"]["index"][:])
+                    elif "_index" in h5f["obs"]:
+                        self.obs_names = self._decode_string_array(h5f["obs"]["_index"][:])
+
+                # Load variable names (genes)
+                if "var" in h5f:
+                    if "index" in h5f["var"]:
+                        self.var_names = self._decode_string_array(h5f["var"]["index"][:])
+                    elif "_index" in h5f["var"]:
+                        self.var_names = self._decode_string_array(h5f["var"]["_index"][:])
+
+    def _decode_string_array(self, arr):
+        """Decode byte strings to unicode if necessary."""
+        if arr.dtype.kind == "S":  # byte string
+            return np.array([s.decode("utf-8") for s in arr])
+        return arr
 
     def _infer_shape(self, h5f) -> Tuple[int, int]:
         """Infer the shape of the data matrix if not explicitly stored."""
@@ -76,48 +97,116 @@ class GCSAnnData:
 
         raise ValueError("Cannot infer shape of the data matrix")
 
-    def get_columns(self, column_indices: Union[List[int], int]) -> csc_matrix:
+    def get_columns(self, columns: Union[List[int], List[str], int, str]) -> csc_matrix:
         """
         Get specific columns from the data matrix.
 
         Parameters
         ----------
-        column_indices : list or int
-            Column index or list of column indices to extract
+        columns : list, int, or str
+            Column indices, variable names, or a single index/name
 
         Returns
         -------
         scipy.sparse.csc_matrix
             A CSC matrix containing only the requested columns
+
+        Examples
+        --------
+        >>> adata = GCSAnnData('gs://bucket/file.h5ad')
+        >>> # Get columns by index
+        >>> cols = adata.get_columns([0, 5, 10])
+        >>> # Get columns by gene name
+        >>> cols = adata.get_columns(['GAPDH', 'CD3D', 'CD8A'])
+        >>> # Get a single column
+        >>> col = adata.get_columns('GAPDH')
         """
-        if isinstance(column_indices, int):
-            column_indices = [column_indices]
+        # Convert single item to list
+        if isinstance(columns, (int, str)):
+            columns = [columns]
+
+        # Convert variable names to indices if needed
+        if self.var_names is not None and isinstance(columns[0], str):
+            try:
+                # Create a mapping of var_names to indices for efficient lookup
+                var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
+                column_indices = [var_to_idx[col] for col in columns]
+            except KeyError as e:
+                raise KeyError(f"Variable name not found: {e}")
+        else:
+            column_indices = columns
+
+        # Validate indices
+        if not all(isinstance(idx, int) for idx in column_indices):
+            raise TypeError("Column indices must be integers")
+
+        if max(column_indices) >= self.shape[1] or min(column_indices) < 0:
+            raise IndexError(f"Column index out of bounds. Shape: {self.shape}")
 
         if self.sparse_format == "csc":
             return self._get_csc_columns(column_indices)
         elif self.sparse_format == "csr":
+            warnings.warn(
+                "Extracting columns from a CSR matrix is inefficient. "
+                "Consider converting your data to CSC format for better performance when accessing columns.",
+                UserWarning,
+            )
             return self._get_csr_columns(column_indices)
         else:
             raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
 
-    def get_rows(self, row_indices: Union[List[int], int]) -> csr_matrix:
+    def get_rows(self, rows: Union[List[int], List[str], int, str]) -> csr_matrix:
         """
         Get specific rows from the data matrix.
 
         Parameters
         ----------
-        row_indices : list or int
-            Row index or list of row indices to extract
+        rows : list, int, or str
+            Row indices, observation names, or a single index/name
 
         Returns
         -------
         scipy.sparse.csr_matrix
             A CSR matrix containing only the requested rows
+
+        Examples
+        --------
+        >>> adata = GCSAnnData('gs://bucket/file.h5ad')
+        >>> # Get rows by index
+        >>> rows = adata.get_rows([0, 5, 10])
+        >>> # Get rows by cell barcode
+        >>> rows = adata.get_rows(['AAACCCAAGCGCCCAT-1', 'AAACCCATCAGCCCAG-1'])
+        >>> # Get a single row
+        >>> row = adata.get_rows('AAACCCAAGCGCCCAT-1')
         """
-        if isinstance(row_indices, int):
-            row_indices = [row_indices]
+        # Convert single item to list
+        if isinstance(rows, (int, str)):
+            rows = [rows]
+
+        # Convert observation names to indices if needed
+        if self.obs_names is not None and isinstance(rows[0], str):
+            try:
+                # Create a mapping of obs_names to indices for efficient lookup
+                obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
+                row_indices = [obs_to_idx[row] for row in rows]
+            except KeyError as e:
+                raise KeyError(f"Observation name not found: {e}")
+        else:
+            row_indices = rows
+
+        # Validate indices
+        if not all(isinstance(idx, int) for idx in row_indices):
+            raise TypeError("Row indices must be integers")
+
+        if max(row_indices) >= self.shape[0] or min(row_indices) < 0:
+            raise IndexError(f"Row index out of bounds. Shape: {self.shape}")
 
         if self.sparse_format == "csc":
+            warnings.warn(
+                "Extracting rows from a CSC matrix is inefficient. "
+                "Consider converting your data to CSR format for better performance when accessing rows.",
+                UserWarning,
+            )
             return self._get_csc_rows(row_indices)
         elif self.sparse_format == "csr":
             return self._get_csr_rows(row_indices)
