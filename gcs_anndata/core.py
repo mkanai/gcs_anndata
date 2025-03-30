@@ -5,7 +5,7 @@ import gcsfs
 import numpy as np
 import warnings
 from scipy.sparse import csc_matrix, csr_matrix
-from typing import List, Union, Tuple, Optional, Sequence
+from typing import List, Union, Tuple, Optional, Dict, Sequence
 
 from .exceptions import InvalidFormatError
 from .utils import infer_sparse_matrix_format
@@ -56,27 +56,42 @@ class GCSAnnData:
                 # Determine sparse format
                 self.sparse_format = infer_sparse_matrix_format(h5f["X"])
 
-                # Load observation names (cell barcodes)
-                if "obs" in h5f:
-                    if "index" in h5f["obs"]:
-                        self.obs_names = self._decode_string_array(h5f["obs"]["index"][:])
-                    elif "_index" in h5f["obs"]:
-                        self.obs_names = self._decode_string_array(h5f["obs"]["_index"][:])
-                    self.obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
+                # Check for precomputed indices in uns
+                if "uns" in h5f:
+                    # Try to load precomputed obs_to_idx
+                    if "_obs_to_idx" in h5f["uns"]:
+                        self.obs_to_idx = self._load_precomputed_index(h5f["uns"]["_obs_to_idx"])
 
-                # Load variable names (genes)
-                if "var" in h5f:
-                    if "index" in h5f["var"]:
-                        self.var_names = self._decode_string_array(h5f["var"]["index"][:])
-                    elif "_index" in h5f["var"]:
-                        self.var_names = self._decode_string_array(h5f["var"]["_index"][:])
-                    self.var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
+                    # Try to load precomputed var_to_idx
+                    if "_var_to_idx" in h5f["uns"]:
+                        self.var_to_idx = self._load_precomputed_index(h5f["uns"]["_var_to_idx"])
+                else:
+                    # Load index names only when precomputed indices are not available
+                    if "obs" in h5f:
+                        if "_index" in h5f["obs"].attrs:
+                            self.obs_names = self._decode_string_array(h5f["obs"][h5f["obs"].attrs["_index"]][:])
+                        if self.obs_names is not None:
+                            self.obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
+                    if "var" in h5f:
+                        if "_index" in h5f["var"].attrs:
+                            self.var_names = self._decode_string_array(h5f["var"][h5f["var"].attrs["_index"]][:])
+                        if self.var_names is not None:
+                            self.var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
 
     def _decode_string_array(self, arr):
         """Decode byte strings to unicode if necessary."""
         if arr.dtype.kind == "S" or isinstance(arr[0], bytes):  # byte string
             return np.array([s.decode("utf-8") for s in arr])
         return arr
+
+    def _load_precomputed_index(self, index_dataset) -> Dict[str, int]:
+        """Load a precomputed index from a structured array dataset."""
+        index_dict = {}
+        for name, idx in index_dataset[:]:
+            if isinstance(name, bytes):
+                name = name.decode("utf-8")
+            index_dict[name] = int(idx)
+        return index_dict
 
     def _infer_shape(self, h5f) -> Tuple[int, int]:
         """Infer the shape of the data matrix if not explicitly stored."""
@@ -130,7 +145,7 @@ class GCSAnnData:
             columns = [columns]
 
         # Convert variable names to indices if needed
-        if self.var_names is not None and isinstance(columns[0], str):
+        if self.var_to_idx is not None and isinstance(columns[0], str):
             try:
                 column_indices = [self.var_to_idx[col] for col in columns]
             except KeyError as e:
@@ -186,7 +201,7 @@ class GCSAnnData:
             rows = [rows]
 
         # Convert observation names to indices if needed
-        if self.obs_names is not None and isinstance(rows[0], str):
+        if self.obs_to_idx is not None and isinstance(rows[0], str):
             try:
                 row_indices = [self.obs_to_idx[row] for row in rows]
             except KeyError as e:
