@@ -3,9 +3,10 @@
 import h5py
 import gcsfs
 import numpy as np
-import warnings
 from scipy.sparse import csc_matrix, csr_matrix
-from typing import List, Union, Tuple, Optional, Dict, Sequence
+import warnings
+from typing import List, Union, Tuple, Optional, Dict, Any
+from functools import cached_property
 
 from .exceptions import InvalidFormatError
 from .utils import infer_sparse_matrix_format
@@ -36,14 +37,12 @@ class GCSAnnData:
         """Initialize the GCSAnnData object."""
         self.gcs_path = gcs_path
         self.fs = gcsfs.GCSFileSystem()
-        self.obs_names = None
-        self.var_names = None
-        self.obs_to_idx = None
-        self.var_to_idx = None
+        self.shape = None
+        self.sparse_format = None
         self._initialize()
 
     def _initialize(self):
-        """Initialize by reading metadata from the h5ad file."""
+        """Initialize by reading basic metadata from the h5ad file."""
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
                 # Get shape from attributes or infer it
@@ -56,27 +55,29 @@ class GCSAnnData:
                 # Determine sparse format
                 self.sparse_format = infer_sparse_matrix_format(h5f["X"])
 
-                # Check for precomputed indices in uns
-                if "uns" in h5f:
-                    # Try to load precomputed obs_to_idx
-                    if "_obs_to_idx" in h5f["uns"]:
-                        self.obs_to_idx = self._load_precomputed_index(h5f["uns"]["_obs_to_idx"])
+    @cached_property
+    def obs_names(self):
+        """Get observation names (lazy loaded)."""
+        return self._get_index_names("obs")
 
-                    # Try to load precomputed var_to_idx
-                    if "_var_to_idx" in h5f["uns"]:
-                        self.var_to_idx = self._load_precomputed_index(h5f["uns"]["_var_to_idx"])
-                else:
-                    # Load index names only when precomputed indices are not available
-                    if "obs" in h5f:
-                        if "_index" in h5f["obs"].attrs:
-                            self.obs_names = self._decode_string_array(h5f["obs"][h5f["obs"].attrs["_index"]][:])
-                        if self.obs_names is not None:
-                            self.obs_to_idx = {name: idx for idx, name in enumerate(self.obs_names)}
-                    if "var" in h5f:
-                        if "_index" in h5f["var"].attrs:
-                            self.var_names = self._decode_string_array(h5f["var"][h5f["var"].attrs["_index"]][:])
-                        if self.var_names is not None:
-                            self.var_to_idx = {name: idx for idx, name in enumerate(self.var_names)}
+    @cached_property
+    def var_names(self):
+        """Get variable names (lazy loaded)."""
+        return self._get_index_names("var")
+
+    @cached_property
+    def obs_to_idx(self):
+        """Get observation name to index mapping (lazy loaded)."""
+        if self.obs_names is not None:
+            return {name: idx for idx, name in enumerate(self.obs_names)}
+        return None
+
+    @cached_property
+    def var_to_idx(self):
+        """Get variable name to index mapping (lazy loaded)."""
+        if self.var_names is not None:
+            return {name: idx for idx, name in enumerate(self.var_names)}
+        return None
 
     def _decode_string_array(self, arr):
         """Decode byte strings to unicode if necessary."""
@@ -84,14 +85,14 @@ class GCSAnnData:
             return np.array([s.decode("utf-8") for s in arr])
         return arr
 
-    def _load_precomputed_index(self, index_dataset) -> Dict[str, int]:
-        """Load a precomputed index from a structured array dataset."""
-        index_dict = {}
-        for name, idx in index_dataset[:]:
-            if isinstance(name, bytes):
-                name = name.decode("utf-8")
-            index_dict[name] = int(idx)
-        return index_dict
+    def _get_index_names(self, group_name):
+        """Get index names from a group in the h5ad file."""
+        with self.fs.open(self.gcs_path, "rb") as f:
+            with h5py.File(f, "r") as h5f:
+                if group_name in h5f:
+                    if "_index" in h5f[group_name].attrs:
+                        return self._decode_string_array(h5f[group_name][h5f[group_name].attrs["_index"]][:])
+                return None
 
     def _infer_shape(self, h5f) -> Tuple[int, int]:
         """Infer the shape of the data matrix if not explicitly stored."""
@@ -145,7 +146,9 @@ class GCSAnnData:
             columns = [columns]
 
         # Convert variable names to indices if needed
-        if self.var_to_idx is not None and isinstance(columns[0], str):
+        if isinstance(columns[0], str):
+            if self.var_to_idx is None:
+                raise ValueError("Variable names not available in this h5ad file")
             try:
                 column_indices = [self.var_to_idx[col] for col in columns]
             except KeyError as e:
@@ -201,7 +204,9 @@ class GCSAnnData:
             rows = [rows]
 
         # Convert observation names to indices if needed
-        if self.obs_to_idx is not None and isinstance(rows[0], str):
+        if isinstance(rows[0], str):
+            if self.obs_to_idx is None:
+                raise ValueError("Observation names not available in this h5ad file")
             try:
                 row_indices = [self.obs_to_idx[row] for row in rows]
             except KeyError as e:
