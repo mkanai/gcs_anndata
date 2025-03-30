@@ -2,6 +2,7 @@
 
 import anndata
 import numpy as np
+import gcsfs
 from typing import Optional, Union, Dict, Any
 
 
@@ -10,10 +11,9 @@ def write_indexed_h5ad(
     filename: str,
     compression: Optional[str] = None,
     compression_opts: Optional[Union[int, Dict[str, Any]]] = None,
-    max_string_length: int = 100,
 ) -> None:
     """
-    Prepare an h5ad file for fast indexing by precomputing and storing name-to-index mappings.
+    Write an h5ad file with precomputed name-to-index mappings for fast indexing.
 
     This function adds precomputed mappings from observation/variable names to their indices,
     which allows for faster lookups when accessing data by name using GCSAnnData.
@@ -21,16 +21,13 @@ def write_indexed_h5ad(
     Parameters
     ----------
     adata : anndata.AnnData
-        The AnnData object to prepare.
+        The AnnData object to write.
     filename : str
         The filename or GCS path to write to.
     compression : str, optional
         Compression method. Options are 'gzip', 'lzf', or None.
     compression_opts : int or dict, optional
         Compression options. See h5py documentation for details.
-    max_string_length : int, default=100
-        Maximum length for string names in the precomputed indices.
-        Increase this if you have very long observation or variable names.
 
     Examples
     --------
@@ -40,10 +37,10 @@ def write_indexed_h5ad(
     >>> # Create or load your AnnData object
     >>> adata = anndata.read_h5ad('input_file.h5ad')
     >>>
-    >>> # Prepare it for fast indexing and save to GCS
+    >>> # Write it with precomputed indices for fast indexing
     >>> write_indexed_h5ad(
     ...     adata,
-    ...     'gs://your-bucket/optimized_data.h5ad',
+    ...     'indexed_data.h5ad',
     ...     compression='gzip'
     ... )
     """
@@ -54,9 +51,13 @@ def write_indexed_h5ad(
     var_to_idx = {name: idx for idx, name in enumerate(adata.var_names)}
     obs_to_idx = {name: idx for idx, name in enumerate(adata.obs_names)}
 
+    # Compute max string length based on actual names
+    var_max_length = len(adata.var_names[np.argmax(adata.var_names.str.len())].encode("utf-8"))
+    obs_max_length = len(adata.obs_names[np.argmax(adata.obs_names.str.len())].encode("utf-8"))
+
     # Create structured arrays for the indices
-    var_dtype = [("name", f"S{max_string_length}"), ("idx", "int32")]
-    obs_dtype = [("name", f"S{max_string_length}"), ("idx", "int32")]
+    var_dtype = [("name", f"S{var_max_length}"), ("idx", "int32")]
+    obs_dtype = [("name", f"S{obs_max_length}"), ("idx", "int32")]
 
     var_index_array = np.array([(k.encode("utf-8"), v) for k, v in var_to_idx.items()], dtype=var_dtype)
     obs_index_array = np.array([(k.encode("utf-8"), v) for k, v in obs_to_idx.items()], dtype=obs_dtype)
