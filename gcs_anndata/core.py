@@ -3,9 +3,10 @@
 import h5py
 import gcsfs
 import numpy as np
+import pandas as pd
 from scipy.sparse import csc_matrix, csr_matrix
 import warnings
-from typing import List, Union, Tuple, Optional, Dict, Any
+from typing import List, Union, Tuple
 from functools import cached_property
 
 from .exceptions import InvalidFormatError
@@ -117,7 +118,9 @@ class GCSAnnData:
 
         raise ValueError("Cannot infer shape of the data matrix")
 
-    def get_columns(self, columns: Union[List[int], List[str], int, str]) -> csc_matrix:
+    def get_columns(
+        self, columns: Union[List[int], List[str], int, str], as_df: bool = False
+    ) -> Union[csc_matrix, pd.DataFrame]:
         """
         Get specific columns from the data matrix.
 
@@ -125,11 +128,13 @@ class GCSAnnData:
         ----------
         columns : list, int, or str
             Column indices, variable names, or a single index/name
+        as_df : bool, default=False
+            If True, return result as pandas DataFrame with appropriate indices
 
         Returns
         -------
-        scipy.sparse.csc_matrix
-            A CSC matrix containing only the requested columns
+        scipy.sparse.csc_matrix or pandas.DataFrame
+            A CSC matrix containing only the requested columns, or a DataFrame if as_df=True
 
         Examples
         --------
@@ -140,6 +145,8 @@ class GCSAnnData:
         >>> cols = adata.get_columns(['GAPDH', 'CD3D', 'CD8A'])
         >>> # Get a single column
         >>> col = adata.get_columns('GAPDH')
+        >>> # Get columns as DataFrame
+        >>> df = adata.get_columns(['GAPDH', 'CD3D'], as_df=True)
         """
         # Convert single item to list
         if isinstance(columns, (int, str)):
@@ -164,18 +171,36 @@ class GCSAnnData:
             raise IndexError(f"Column index out of bounds. Shape: {self.shape}")
 
         if self.sparse_format == "csc":
-            return self._get_csc_columns(column_indices)
+            result = self._get_csc_columns(column_indices)
         elif self.sparse_format == "csr":
             warnings.warn(
                 "Extracting columns from a CSR matrix is inefficient. "
                 "Consider converting your data to CSC format for better performance when accessing columns.",
                 UserWarning,
             )
-            return self._get_csr_columns(column_indices)
+            result = self._get_csr_columns(column_indices)
         else:
             raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
 
-    def get_rows(self, rows: Union[List[int], List[str], int, str]) -> csr_matrix:
+        if as_df:
+            # Get the original column names for the selected indices
+            if isinstance(columns[0], str):
+                col_names = columns
+            else:
+                col_names = [self.var_names[idx] for idx in column_indices]
+
+            # Convert to dense matrix for DataFrame creation
+            dense_matrix = result.toarray()
+
+            # Create DataFrame with appropriate row and column indices
+            df = pd.DataFrame(dense_matrix, index=self.obs_names, columns=col_names)
+            return df
+
+        return result
+
+    def get_rows(
+        self, rows: Union[List[int], List[str], int, str], as_df: bool = False
+    ) -> Union[csr_matrix, pd.DataFrame]:
         """
         Get specific rows from the data matrix.
 
@@ -183,11 +208,13 @@ class GCSAnnData:
         ----------
         rows : list, int, or str
             Row indices, observation names, or a single index/name
+        as_df : bool, default=False
+            If True, return result as pandas DataFrame with appropriate indices
 
         Returns
         -------
-        scipy.sparse.csr_matrix
-            A CSR matrix containing only the requested rows
+        scipy.sparse.csr_matrix or pandas.DataFrame
+            A CSR matrix containing only the requested rows, or a DataFrame if as_df=True
 
         Examples
         --------
@@ -198,6 +225,8 @@ class GCSAnnData:
         >>> rows = adata.get_rows(['AAACCCAAGCGCCCAT-1', 'AAACCCATCAGCCCAG-1'])
         >>> # Get a single row
         >>> row = adata.get_rows('AAACCCAAGCGCCCAT-1')
+        >>> # Get rows as DataFrame
+        >>> df = adata.get_rows(['AAACCCAAGCGCCCAT-1', 'AAACCCATCAGCCCAG-1'], as_df=True)
         """
         # Convert single item to list
         if isinstance(rows, (int, str)):
@@ -221,17 +250,33 @@ class GCSAnnData:
         if max(row_indices) >= self.shape[0] or min(row_indices) < 0:
             raise IndexError(f"Row index out of bounds. Shape: {self.shape}")
 
-        if self.sparse_format == "csc":
+        if self.sparse_format == "csr":
+            result = self._get_csr_rows(row_indices)
+        elif self.sparse_format == "csc":
             warnings.warn(
                 "Extracting rows from a CSC matrix is inefficient. "
                 "Consider converting your data to CSR format for better performance when accessing rows.",
                 UserWarning,
             )
-            return self._get_csc_rows(row_indices)
-        elif self.sparse_format == "csr":
-            return self._get_csr_rows(row_indices)
+            result = self._get_csc_rows(row_indices)
         else:
             raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+
+        if as_df:
+            # Get the original row names for the selected indices
+            if isinstance(rows[0], str):
+                row_names = rows
+            else:
+                row_names = [self.obs_names[idx] for idx in row_indices]
+
+            # Convert to dense matrix for DataFrame creation
+            dense_matrix = result.toarray()
+
+            # Create DataFrame with appropriate row and column indices
+            df = pd.DataFrame(dense_matrix, index=row_names, columns=self.var_names)
+            return df
+
+        return result
 
     def _get_csc_columns(self, column_indices: List[int]) -> csc_matrix:
         """Get columns from a CSC matrix."""

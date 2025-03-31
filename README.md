@@ -15,7 +15,9 @@ GCS AnnData is a Python package that enables efficient partial reading of AnnDat
 You can install gcs_anndata using pip:
 
 ```bash
-pip install gcs-anndata
+# TODO: pip install gcs-anndata
+git clone https://github.com/mkanai/gcs_anndata
+pip install ./gcs_anndata
 ```
 
 ## Usage
