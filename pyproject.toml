@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gcs_anndata"
+version = "0.1.0"
+description = "Efficient partial reading of AnnData objects stored on Google Cloud Storage"
+readme = "README.md"
+authors = [
+    {name = "Masahiro Kanai", email = "mkanai@broadinstitute.org"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+keywords = ["bioinformatics", "single-cell", "anndata", "gcs", "cloud-storage"]
+requires-python = ">=3.7"
+dependencies = [
+    "anndata>=0.7.0",
+    "gcsfs>=2022.1.0",
+    "h5py>=3.0.0",
+    "numpy>=1.17.0",
+    "pandas>=1.0.0",
+    "scipy>=1.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "pytest",
+    "pytest-cov",
+    "build",
+    "twine",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/mkanai/gcs_anndata"
+"Bug Tracker" = "https://github.com/mkanai/gcs_anndata/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gcs_anndata*"]
+exclude = ["tests*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py37", "py38", "py39", "py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
