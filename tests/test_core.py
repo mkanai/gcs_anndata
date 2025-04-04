@@ -84,7 +84,7 @@ class TestGCSAnnData:
                 adata_local = ad.read_h5ad(local_path)
 
                 # Test getting columns by index
-                col_indices = [0, 2, 5]
+                col_indices = [0, 2, 5, 2]
                 cols_gcs = adata_gcs.get_columns(col_indices)
                 assert sparse.isspmatrix_csc(cols_gcs)
                 assert cols_gcs.shape == (adata_gcs.shape[0], len(col_indices))
@@ -181,7 +181,7 @@ class TestGCSAnnData:
                 adata_local = ad.read_h5ad(local_path)
 
                 # Test getting rows by index
-                row_indices = [0, 3, 7]
+                row_indices = [0, 3, 7, 3]
                 rows_gcs = adata_gcs.get_rows(row_indices)
 
                 assert sparse.isspmatrix_csr(rows_gcs)
@@ -192,11 +192,6 @@ class TestGCSAnnData:
                     rows_local = adata_local.X[row_indices, :].tocsr()
                 else:
                     rows_local = sparse.csr_matrix(adata_local.X[row_indices, :])
-
-                print(gcs_path)
-                print(adata_local)
-                print(GCSAnnData(gcs_path).get_rows(row_indices, as_df=True))
-                # print(rows_local)
 
                 # Check that the data is the same
                 assert (rows_gcs.data == rows_local.data).all()

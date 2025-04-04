@@ -218,6 +218,40 @@ class GCSAnnData:
 
         return result
 
+    def _extract_sparse_data(self, X_group, indices, indptr_values, indptr_map):
+        """Extract data, indices and indptr arrays for the sparse matrix slice."""
+        all_data = []
+        all_indices = []
+        all_indptr = [0]
+
+        for idx in indices:
+            # Get positions in the indptr_values array
+            start_pos = indptr_map[idx]
+            end_pos = indptr_map[idx + 1]
+
+            # Get start and end values
+            start = indptr_values[start_pos]
+            end = indptr_values[end_pos]
+
+            if end > start:  # Only read if there's data
+                all_data.append(X_group["data"][start:end])
+                all_indices.append(X_group["indices"][start:end])
+
+            # Update indptr for the new matrix
+            all_indptr.append(all_indptr[-1] + (end - start))
+
+        # Concatenate all data and indices
+        if all_data:
+            data = np.concatenate(all_data)
+            indices_array = np.concatenate(all_indices)
+        else:
+            data = np.array([], dtype=np.float32)
+            indices_array = np.array([], dtype=np.int32)
+
+        indptr = np.array(all_indptr, dtype=np.int32)
+
+        return data, indices_array, indptr
+
     def _get_direct_slice(self, indices, is_column=True):
         """
         Get a slice directly from the sparse matrix in its native format.
@@ -237,55 +271,57 @@ class GCSAnnData:
         scipy.sparse.spmatrix
             Extracted slice as a sparse matrix
         """
-        indices = sorted(set(indices))
+
+        # Get unique indices while preserving order
+        indices_array = np.array(indices)
+        unique_indices, inverse_indices = np.unique(indices_array, return_inverse=True)
+        # Check if indices are already unique and sorted
+        is_unique_sorted = len(unique_indices) == len(indices_array) and np.array_equal(unique_indices, indices_array)
+
+        # Calculate result shape based on slice type
+        if is_column:
+            result_shape = (self.shape[0], len(indices))
+            unique_matrix_shape = (self.shape[0], len(unique_indices))
+            matrix_class = csc_matrix
+        else:
+            result_shape = (len(indices), self.shape[1])
+            unique_matrix_shape = (len(unique_indices), self.shape[1])
+            matrix_class = csr_matrix
+
+        # Handle empty indices case
+        if not unique_indices.size:
+            return matrix_class((0, 0), shape=result_shape)
 
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
                 X_group = h5f["X"]
 
-                # Read indptr for all requested indices
-                indptr_slice = X_group["indptr"][indices + [max(indices) + 1]]
+                # Create indptr indices needed for reading (each index and index+1)
+                indptr_indices = sorted({i for idx in unique_indices for i in (idx, idx + 1)})
 
-                # Calculate start and end positions for each index
-                starts = indptr_slice[:-1]
-                ends = indptr_slice[1:]
+                # Read only the necessary indptr values
+                indptr_values = X_group["indptr"][indptr_indices]
 
-                # Initialize lists to store data
-                all_data = []
-                all_indices = []
-                all_indptr = [0]
+                # Create a mapping from original indices to positions in indptr_values
+                indptr_map = {idx: pos for pos, idx in enumerate(indptr_indices)}
 
-                # Read data and indices for all needed ranges
-                for start, end in zip(starts, ends):
-                    if end > start:  # Only read if there's data
-                        data_slice = X_group["data"][start:end]
-                        indices_slice = X_group["indices"][start:end]
+                # Extract and process the data
+                all_data, all_indices, all_indptr = self._extract_sparse_data(
+                    X_group, unique_indices, indptr_values, indptr_map
+                )
 
-                        all_data.append(data_slice)
-                        all_indices.append(indices_slice)
+                # Create the sparse matrix with unique slices
+                unique_matrix = matrix_class((all_data, all_indices, all_indptr), shape=unique_matrix_shape)
 
-                    # Update indptr for the new matrix
-                    all_indptr.append(all_indptr[-1] + (end - start))
+                # If indices are already unique and sorted, return directly
+                if is_unique_sorted:
+                    return unique_matrix
 
-                # Concatenate all data and indices
-                if all_data:
-                    data = np.concatenate(all_data)
-                    indices_array = np.concatenate(all_indices)
+                # Otherwise, rearrange columns/rows to match original indices
+                if is_column:
+                    return unique_matrix[:, inverse_indices]
                 else:
-                    data = np.array([], dtype=np.float32)
-                    indices_array = np.array([], dtype=np.int32)
-
-                indptr = np.array(all_indptr, dtype=np.int32)
-
-                # Create the sparse matrix with only the requested slice
-                if is_column:  # CSC matrix for columns
-                    result_shape = (self.shape[0], len(indices))
-                    result = csc_matrix((data, indices_array, indptr), shape=result_shape)
-                else:  # CSR matrix for rows
-                    result_shape = (len(indices), self.shape[1])
-                    result = csr_matrix((data, indices_array, indptr), shape=result_shape)
-
-                return result
+                    return unique_matrix[inverse_indices, :]
 
     def _get_indirect_slice(self, indices, is_column=True):
         """
