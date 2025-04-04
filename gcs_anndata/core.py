@@ -1,13 +1,13 @@
 """Core functionality for GCS AnnData."""
 
-import h5py
 import gcsfs
+import h5py
 import numpy as np
 import pandas as pd
-from scipy.sparse import csc_matrix, csr_matrix
 import warnings
-from typing import List, Union, Tuple
 from functools import cached_property
+from scipy.sparse import csc_matrix, csr_matrix
+from typing import List, Union, Tuple, Optional
 
 from .exceptions import InvalidFormatError
 from .utils import infer_sparse_matrix_format
@@ -17,6 +17,10 @@ class GCSAnnData:
     """
     Class for partially reading AnnData objects stored in h5ad format on Google Cloud Storage.
 
+    This class provides efficient access to specific parts of an AnnData object stored
+    in h5ad format on Google Cloud Storage without loading the entire dataset into memory.
+    It supports reading specific rows or columns from sparse matrices (CSR or CSC format).
+
     Parameters
     ----------
     gcs_path : str
@@ -24,7 +28,11 @@ class GCSAnnData:
 
     Attributes
     ----------
-    shape : tuple
+    gcs_path : str
+        Path to the h5ad file on GCS
+    fs : gcsfs.GCSFileSystem
+        GCS filesystem object
+    shape : Tuple[int, int]
         Shape of the data matrix (n_obs, n_vars)
     sparse_format : str
         Format of the sparse matrix ('csc' or 'csr')
@@ -32,18 +40,48 @@ class GCSAnnData:
         Names of observations (cell barcodes)
     var_names : np.ndarray
         Names of variables (genes)
+    obs_to_idx : Dict[str, int]
+        Mapping from observation names to indices
+    var_to_idx : Dict[str, int]
+        Mapping from variable names to indices
+
+    Raises
+    ------
+    InvalidFormatError
+        If the h5ad file does not contain a sparse matrix in CSR or CSC format
+    ValueError
+        If the h5ad file does not contain an X matrix or if the shape cannot be inferred
     """
 
-    def __init__(self, gcs_path: str):
-        """Initialize the GCSAnnData object."""
+    def __init__(self, gcs_path: str) -> None:
+        """
+        Initialize the GCSAnnData object.
+
+        Parameters
+        ----------
+        gcs_path : str
+            Path to the h5ad file on GCS (e.g., 'gs://bucket/path/to/file.h5ad')
+        """
         self.gcs_path = gcs_path
         self.fs = gcsfs.GCSFileSystem()
-        self.shape = None
-        self.sparse_format = None
+        self.shape: Optional[Tuple[int, int]] = None
+        self.sparse_format: Optional[str] = None
         self._initialize()
 
-    def _initialize(self):
-        """Initialize by reading basic metadata from the h5ad file."""
+    def _initialize(self) -> None:
+        """
+        Initialize by reading basic metadata from the h5ad file.
+
+        Reads the sparse format and shape of the data matrix from the h5ad file.
+        Validates that the file contains a sparse matrix in CSR or CSC format.
+
+        Raises
+        ------
+        InvalidFormatError
+            If the h5ad file does not contain a sparse matrix in CSR or CSC format
+        ValueError
+            If the h5ad file does not contain an X matrix or if the shape cannot be inferred
+        """
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
                 # Check if X exists
