@@ -46,15 +46,27 @@ class GCSAnnData:
         """Initialize by reading basic metadata from the h5ad file."""
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
+                # Check if X exists
+                if "X" not in h5f.keys():
+                    raise ValueError("No X matrix found in the h5ad file")
+
+                # Check if the matrix is in sparse format
+                X_group = h5f["X"]
+
+                # Determine sparse format
+                try:
+                    self.sparse_format = infer_sparse_matrix_format(X_group)
+                    if self.sparse_format not in ["csr", "csc"]:
+                        raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+                except ValueError as e:
+                    raise InvalidFormatError(f"Only sparse matrices (CSR or CSC) are supported: {str(e)}")
+
                 # Get shape from attributes or infer it
-                if "X" in h5f and "shape" in h5f["X"].attrs:
-                    self.shape = tuple(h5f["X"].attrs["shape"])
+                if "shape" in X_group.attrs:
+                    self.shape = tuple(X_group.attrs["shape"])
                 else:
                     # Try to infer shape from indptr length
                     self.shape = self._infer_shape(h5f)
-
-                # Determine sparse format
-                self.sparse_format = infer_sparse_matrix_format(h5f["X"])
 
     @cached_property
     def obs_names(self):
@@ -90,7 +102,7 @@ class GCSAnnData:
         """Get index names from a group in the h5ad file."""
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
-                if group_name in h5f:
+                if group_name in h5f.keys():
                     if "_index" in h5f[group_name].attrs:
                         return self._decode_string_array(h5f[group_name][h5f[group_name].attrs["_index"]][:])
                 return None
@@ -98,7 +110,7 @@ class GCSAnnData:
     def _infer_shape(self, h5f) -> Tuple[int, int]:
         """Infer the shape of the data matrix if not explicitly stored."""
         X_group = h5f["X"]
-        if "indptr" in X_group and "indices" in X_group:
+        if "indptr" in X_group.keys() and "indices" in X_group.keys():
             indptr = X_group["indptr"][:]
             if len(X_group["indices"]) > 0:
                 indices_max = X_group["indices"][:].max()

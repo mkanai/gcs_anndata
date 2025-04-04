@@ -7,8 +7,9 @@ setup(
     version="0.1.0",
     packages=find_packages(),
     install_requires=[
-        "h5py>=3.1.0",
+        'pytest>=6.0',
         "gcsfs>=2021.4.0",
+        "h5py>=3.1.0",
         "numpy>=1.19.0",
         "scipy>=1.5.0",
     ],
