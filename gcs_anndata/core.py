@@ -118,6 +118,203 @@ class GCSAnnData:
 
         raise ValueError("Cannot infer shape of the data matrix")
 
+    def _get_indices_from_names(self, names, is_column=True):
+        """
+        Convert names to indices.
+
+        Parameters
+        ----------
+        names : list of str or int, or single str or int
+            Names or indices to convert
+        is_column : bool, default=True
+            If True, convert variable names, otherwise convert observation names
+
+        Returns
+        -------
+        list of int
+            Converted indices
+        """
+        # Convert single item to list
+        if isinstance(names, (int, str)):
+            names = [names]
+
+        # Convert names to indices if needed
+        if isinstance(names[0], str):
+            name_to_idx = self.var_to_idx if is_column else self.obs_to_idx
+            idx_type = "Variable" if is_column else "Observation"
+
+            if name_to_idx is None:
+                raise ValueError(f"{idx_type} names not available in this h5ad file")
+            try:
+                indices = [name_to_idx[name] for name in names]
+            except KeyError as e:
+                raise KeyError(f"{idx_type} name not found: {e}")
+        else:
+            indices = names
+
+        # Validate indices
+        if not all(isinstance(idx, int) for idx in indices):
+            raise TypeError(f"{'Column' if is_column else 'Row'} indices must be integers")
+
+        max_dim = self.shape[1] if is_column else self.shape[0]
+        if max(indices) >= max_dim or min(indices) < 0:
+            raise IndexError(f"{'Column' if is_column else 'Row'} index out of bounds. Shape: {self.shape}")
+
+        return indices
+
+    def _get_matrix_slice(self, indices, is_column=True):
+        """
+        Get a slice of the matrix (rows or columns).
+
+        Parameters
+        ----------
+        indices : list of int
+            Indices to extract
+        is_column : bool, default=True
+            If True, extract columns, otherwise extract rows
+
+        Returns
+        -------
+        scipy.sparse.spmatrix
+            Extracted slice as a sparse matrix
+        """
+        # Determine the optimal and fallback methods based on sparse format and slice type
+        if is_column:  # Getting columns
+            if self.sparse_format == "csc":
+                result = self._get_direct_slice(indices, is_column=True)
+            elif self.sparse_format == "csr":
+                warnings.warn(
+                    "Extracting columns from a CSR matrix is inefficient. "
+                    "Consider converting your data to CSC format for better performance when accessing columns.",
+                    UserWarning,
+                )
+                result = self._get_indirect_slice(indices, is_column=True)
+            else:
+                raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+        else:  # Getting rows
+            if self.sparse_format == "csr":
+                result = self._get_direct_slice(indices, is_column=False)
+            elif self.sparse_format == "csc":
+                warnings.warn(
+                    "Extracting rows from a CSC matrix is inefficient. "
+                    "Consider converting your data to CSR format for better performance when accessing rows.",
+                    UserWarning,
+                )
+                result = self._get_indirect_slice(indices, is_column=False)
+            else:
+                raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+
+        return result
+
+    def _get_direct_slice(self, indices, is_column=True):
+        """
+        Get a slice directly from the sparse matrix in its native format.
+
+        This is the efficient method when the slice type matches the matrix format
+        (columns from CSC or rows from CSR).
+
+        Parameters
+        ----------
+        indices : list of int
+            Indices to extract
+        is_column : bool, default=True
+            If True, extract columns from CSC, otherwise extract rows from CSR
+
+        Returns
+        -------
+        scipy.sparse.spmatrix
+            Extracted slice as a sparse matrix
+        """
+        indices = sorted(set(indices))
+
+        with self.fs.open(self.gcs_path, "rb") as f:
+            with h5py.File(f, "r") as h5f:
+                X_group = h5f["X"]
+
+                # Read indptr for all requested indices
+                indptr_slice = X_group["indptr"][indices + [max(indices) + 1]]
+
+                # Calculate start and end positions for each index
+                starts = indptr_slice[:-1]
+                ends = indptr_slice[1:]
+
+                # Initialize lists to store data
+                all_data = []
+                all_indices = []
+                all_indptr = [0]
+
+                # Read data and indices for all needed ranges
+                for start, end in zip(starts, ends):
+                    if end > start:  # Only read if there's data
+                        data_slice = X_group["data"][start:end]
+                        indices_slice = X_group["indices"][start:end]
+
+                        all_data.append(data_slice)
+                        all_indices.append(indices_slice)
+
+                    # Update indptr for the new matrix
+                    all_indptr.append(all_indptr[-1] + (end - start))
+
+                # Concatenate all data and indices
+                if all_data:
+                    data = np.concatenate(all_data)
+                    indices_array = np.concatenate(all_indices)
+                else:
+                    data = np.array([], dtype=np.float32)
+                    indices_array = np.array([], dtype=np.int32)
+
+                indptr = np.array(all_indptr, dtype=np.int32)
+
+                # Create the sparse matrix with only the requested slice
+                if is_column:  # CSC matrix for columns
+                    result_shape = (self.shape[0], len(indices))
+                    result = csc_matrix((data, indices_array, indptr), shape=result_shape)
+                else:  # CSR matrix for rows
+                    result_shape = (len(indices), self.shape[1])
+                    result = csr_matrix((data, indices_array, indptr), shape=result_shape)
+
+                return result
+
+    def _get_indirect_slice(self, indices, is_column=True):
+        """
+        Get a slice indirectly by loading the full matrix and then slicing.
+
+        This is the less efficient fallback method when the slice type doesn't match
+        the matrix format (rows from CSC or columns from CSR).
+
+        Parameters
+        ----------
+        indices : list of int
+            Indices to extract
+        is_column : bool, default=True
+            If True, extract columns, otherwise extract rows
+
+        Returns
+        -------
+        scipy.sparse.spmatrix
+            Extracted slice as a sparse matrix
+        """
+        with self.fs.open(self.gcs_path, "rb") as f:
+            with h5py.File(f, "r") as h5f:
+                X_group = h5f["X"]
+
+                # Read all data, indices, and indptr
+                data = X_group["data"][:]
+                indices_array = X_group["indices"][:]
+                indptr = X_group["indptr"][:]
+
+                # Create the full sparse matrix in its native format
+                if self.sparse_format == "csc":
+                    full_matrix = csc_matrix((data, indices_array, indptr), shape=self.shape)
+                else:  # CSR
+                    full_matrix = csr_matrix((data, indices_array, indptr), shape=self.shape)
+
+                # Extract the requested slice
+                if is_column:  # Get columns
+                    return full_matrix[:, indices].tocsc()
+                else:  # Get rows
+                    return full_matrix[indices, :].tocsr()
+
     def get_columns(
         self, columns: Union[List[int], List[str], int, str], as_df: bool = False
     ) -> Union[csc_matrix, pd.DataFrame]:
@@ -148,43 +345,15 @@ class GCSAnnData:
         >>> # Get columns as DataFrame
         >>> df = adata.get_columns(['GAPDH', 'CD3D'], as_df=True)
         """
-        # Convert single item to list
-        if isinstance(columns, (int, str)):
-            columns = [columns]
+        # Convert names/indices and validate
+        column_indices = self._get_indices_from_names(columns, is_column=True)
 
-        # Convert variable names to indices if needed
-        if isinstance(columns[0], str):
-            if self.var_to_idx is None:
-                raise ValueError("Variable names not available in this h5ad file")
-            try:
-                column_indices = [self.var_to_idx[col] for col in columns]
-            except KeyError as e:
-                raise KeyError(f"Variable name not found: {e}")
-        else:
-            column_indices = columns
-
-        # Validate indices
-        if not all(isinstance(idx, int) for idx in column_indices):
-            raise TypeError("Column indices must be integers")
-
-        if max(column_indices) >= self.shape[1] or min(column_indices) < 0:
-            raise IndexError(f"Column index out of bounds. Shape: {self.shape}")
-
-        if self.sparse_format == "csc":
-            result = self._get_csc_columns(column_indices)
-        elif self.sparse_format == "csr":
-            warnings.warn(
-                "Extracting columns from a CSR matrix is inefficient. "
-                "Consider converting your data to CSC format for better performance when accessing columns.",
-                UserWarning,
-            )
-            result = self._get_csr_columns(column_indices)
-        else:
-            raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+        # Get the matrix slice
+        result = self._get_matrix_slice(column_indices, is_column=True)
 
         if as_df:
             # Get the original column names for the selected indices
-            if isinstance(columns[0], str):
+            if isinstance(columns, (list, tuple)) and isinstance(columns[0], str):
                 col_names = columns
             else:
                 col_names = [self.var_names[idx] for idx in column_indices]
@@ -228,43 +397,15 @@ class GCSAnnData:
         >>> # Get rows as DataFrame
         >>> df = adata.get_rows(['AAACCCAAGCGCCCAT-1', 'AAACCCATCAGCCCAG-1'], as_df=True)
         """
-        # Convert single item to list
-        if isinstance(rows, (int, str)):
-            rows = [rows]
+        # Convert names/indices and validate
+        row_indices = self._get_indices_from_names(rows, is_column=False)
 
-        # Convert observation names to indices if needed
-        if isinstance(rows[0], str):
-            if self.obs_to_idx is None:
-                raise ValueError("Observation names not available in this h5ad file")
-            try:
-                row_indices = [self.obs_to_idx[row] for row in rows]
-            except KeyError as e:
-                raise KeyError(f"Observation name not found: {e}")
-        else:
-            row_indices = rows
-
-        # Validate indices
-        if not all(isinstance(idx, int) for idx in row_indices):
-            raise TypeError("Row indices must be integers")
-
-        if max(row_indices) >= self.shape[0] or min(row_indices) < 0:
-            raise IndexError(f"Row index out of bounds. Shape: {self.shape}")
-
-        if self.sparse_format == "csr":
-            result = self._get_csr_rows(row_indices)
-        elif self.sparse_format == "csc":
-            warnings.warn(
-                "Extracting rows from a CSC matrix is inefficient. "
-                "Consider converting your data to CSR format for better performance when accessing rows.",
-                UserWarning,
-            )
-            result = self._get_csc_rows(row_indices)
-        else:
-            raise InvalidFormatError(f"Unsupported sparse format: {self.sparse_format}")
+        # Get the matrix slice
+        result = self._get_matrix_slice(row_indices, is_column=False)
 
         if as_df:
             # Get the original row names for the selected indices
-            if isinstance(rows[0], str):
+            if isinstance(rows, (list, tuple)) and isinstance(rows[0], str):
                 row_names = rows
             else:
                 row_names = [self.obs_names[idx] for idx in row_indices]
@@ -277,137 +418,3 @@ class GCSAnnData:
             return df
 
         return result
-
-    def _get_csc_columns(self, column_indices: List[int]) -> csc_matrix:
-        """Get columns from a CSC matrix."""
-        column_indices = sorted(set(column_indices))
-
-        with self.fs.open(self.gcs_path, "rb") as f:
-            with h5py.File(f, "r") as h5f:
-                X_group = h5f["X"]
-
-                # Read indptr for all requested columns
-                col_indptr = X_group["indptr"][column_indices + [max(column_indices) + 1]]
-
-                # Calculate start and end positions for each column
-                starts = col_indptr[:-1]
-                ends = col_indptr[1:]
-
-                # Initialize lists to store data
-                all_data = []
-                all_indices = []
-                all_indptr = [0]
-
-                # Read data and indices for all needed ranges
-                for start, end in zip(starts, ends):
-                    if end > start:  # Only read if there's data
-                        data_slice = X_group["data"][start:end]
-                        indices_slice = X_group["indices"][start:end]
-
-                        all_data.append(data_slice)
-                        all_indices.append(indices_slice)
-
-                    # Update indptr for the new matrix
-                    all_indptr.append(all_indptr[-1] + (end - start))
-
-                # Concatenate all data and indices
-                if all_data:
-                    data = np.concatenate(all_data)
-                    indices = np.concatenate(all_indices)
-                else:
-                    data = np.array([], dtype=np.float32)
-                    indices = np.array([], dtype=np.int32)
-
-                indptr = np.array(all_indptr, dtype=np.int32)
-
-                # Create the CSC matrix with only the requested columns
-                result_shape = (self.shape[0], len(column_indices))
-                result = csc_matrix((data, indices, indptr), shape=result_shape)
-
-                return result
-
-    def _get_csr_rows(self, row_indices: List[int]) -> csr_matrix:
-        """Get rows from a CSR matrix."""
-        row_indices = sorted(set(row_indices))
-
-        with self.fs.open(self.gcs_path, "rb") as f:
-            with h5py.File(f, "r") as h5f:
-                X_group = h5f["X"]
-
-                # Read indptr for all requested rows
-                row_indptr = X_group["indptr"][row_indices + [max(row_indices) + 1]]
-
-                # Calculate start and end positions for each row
-                starts = row_indptr[:-1]
-                ends = row_indptr[1:]
-
-                # Initialize lists to store data
-                all_data = []
-                all_indices = []
-                all_indptr = [0]
-
-                # Read data and indices for all needed ranges
-                for start, end in zip(starts, ends):
-                    if end > start:  # Only read if there's data
-                        data_slice = X_group["data"][start:end]
-                        indices_slice = X_group["indices"][start:end]
-
-                        all_data.append(data_slice)
-                        all_indices.append(indices_slice)
-
-                    # Update indptr for the new matrix
-                    all_indptr.append(all_indptr[-1] + (end - start))
-
-                # Concatenate all data and indices
-                if all_data:
-                    data = np.concatenate(all_data)
-                    indices = np.concatenate(all_indices)
-                else:
-                    data = np.array([], dtype=np.float32)
-                    indices = np.array([], dtype=np.int32)
-
-                indptr = np.array(all_indptr, dtype=np.int32)
-
-                # Create the CSR matrix with only the requested rows
-                result_shape = (len(row_indices), self.shape[1])
-                result = csr_matrix((data, indices, indptr), shape=result_shape)
-
-                return result
-
-    def _get_csc_rows(self, row_indices: List[int]) -> csr_matrix:
-        """Get rows from a CSC matrix (less efficient)."""
-        # This is a fallback method that gets all columns and then selects rows
-        # For better performance with large matrices, implement a direct method
-        with self.fs.open(self.gcs_path, "rb") as f:
-            with h5py.File(f, "r") as h5f:
-                X_group = h5f["X"]
-
-                # Read all data, indices, and indptr
-                data = X_group["data"][:]
-                indices = X_group["indices"][:]
-                indptr = X_group["indptr"][:]
-
-                # Create the full CSC matrix
-                full_matrix = csc_matrix((data, indices, indptr), shape=self.shape)
-
-                # Extract the requested rows
-                return full_matrix[row_indices, :].tocsr()
-
-    def _get_csr_columns(self, column_indices: List[int]) -> csc_matrix:
-        """Get columns from a CSR matrix (less efficient)."""
-        # This is a fallback method that gets all rows and then selects columns
-        # For better performance with large matrices, implement a direct method
-        with self.fs.open(self.gcs_path, "rb") as f:
-            with h5py.File(f, "r") as h5f:
-                X_group = h5f["X"]
-
-                # Read all data, indices, and indptr
-                data = X_group["data"][:]
-                indices = X_group["indices"][:]
-                indptr = X_group["indptr"][:]
-
-                # Create the full CSR matrix
-                full_matrix = csr_matrix((data, indices, indptr), shape=self.shape)
-
-                # Extract the requested columns
-                return full_matrix[:, column_indices].tocsc()
