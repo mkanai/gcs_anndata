@@ -130,6 +130,16 @@ class GCSAnnData:
             return {name: idx for idx, name in enumerate(self.var_names)}
         return None
 
+    @cached_property
+    def obs(self):
+        """Get observation annotations as pandas DataFrame (lazy loaded)."""
+        return self._get_dataframe("obs")
+
+    @cached_property
+    def var(self):
+        """Get variable annotations as pandas DataFrame (lazy loaded)."""
+        return self._get_dataframe("var")
+
     def _decode_string_array(self, arr):
         """Decode byte strings to unicode if necessary."""
         if arr.dtype.kind == "S" or isinstance(arr[0], bytes):  # byte string
@@ -144,6 +154,59 @@ class GCSAnnData:
                     if "_index" in h5f[group_name].attrs:
                         return self._decode_string_array(h5f[group_name][h5f[group_name].attrs["_index"]][:])
                 return None
+
+    def _get_dataframe(self, group_name):
+        """
+        Get a dataframe from a group in the h5ad file.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the group to read ('obs' or 'var')
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame containing the data from the specified group
+        """
+        with self.fs.open(self.gcs_path, "rb") as f:
+            with h5py.File(f, "r") as h5f:
+                if group_name not in h5f.keys():
+                    return pd.DataFrame()
+
+                group = h5f[group_name]
+                data = {}
+
+                # Get all datasets in the group
+                for key in group.keys():
+                    if key == group.attrs.get("_index", None):
+                        continue  # Skip the index column as it will be used for the DataFrame index
+
+                    try:
+                        # Check if it's a dataset before trying to read it
+                        item = group[key]
+                        if isinstance(item, h5py.Dataset):
+                            # Read the dataset
+                            dataset = item[()]  # Use [()] instead of [:] to read the entire dataset
+
+                            # Decode if it's a string array
+                            if dataset.dtype.kind == "S" or (len(dataset) > 0 and isinstance(dataset[0], bytes)):
+                                dataset = self._decode_string_array(dataset)
+
+                            data[key] = dataset
+                    except Exception as e:
+                        warnings.warn(f"Error reading dataset {key}: {str(e)}")
+
+                # Create DataFrame
+                df = pd.DataFrame(data)
+
+                # Set index using cached properties
+                if group_name == "obs":
+                    df.index = self.obs_names if self.obs_names is not None else pd.RangeIndex(len(df))
+                elif group_name == "var":
+                    df.index = self.var_names if self.var_names is not None else pd.RangeIndex(len(df))
+
+                return df
 
     def _infer_shape(self, h5f) -> Tuple[int, int]:
         """Infer the shape of the data matrix if not explicitly stored."""
