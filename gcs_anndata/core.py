@@ -140,6 +140,16 @@ class GCSAnnData:
         """Get variable annotations as pandas DataFrame (lazy loaded)."""
         return self._get_dataframe("var")
 
+    @cached_property
+    def n_obs(self):
+        """Get number of observations (cells)."""
+        return self.shape[0]
+
+    @cached_property
+    def n_var(self):
+        """Get number of variables (genes)."""
+        return self.shape[1]
+
     def _decode_string_array(self, arr):
         """Decode byte strings to unicode if necessary."""
         if arr.dtype.kind == "S" or isinstance(arr[0], bytes):  # byte string
