@@ -18,8 +18,7 @@ You can install gcs_anndata using pip:
 
 ```bash
 # TODO: pip install gcs-anndata
-git clone https://github.com/mkanai/gcs_anndata
-pip install ./gcs_anndata
+pip install git+https://github.com/mkanai/gcs_anndata
 ```
 
 ## Usage
