@@ -204,6 +204,8 @@ class GCSAnnData:
                                 dataset = self._decode_string_array(dataset)
 
                             data[key] = dataset
+                        else:
+                            warnings.warn(f"Skipping non-dataset item: {key}")
                     except Exception as e:
                         warnings.warn(f"Error reading dataset {key}: {str(e)}")
 
