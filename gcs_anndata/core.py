@@ -204,8 +204,12 @@ class GCSAnnData:
                                 dataset = self._decode_string_array(dataset)
 
                             data[key] = dataset
+                        elif isinstance(item, h5py.Group):
+                            # categorical data
+                            categories = self._decode_string_array(item["categories"][:])
+                            data[key] = pd.Categorical.from_codes(item["codes"][:], categories)
                         else:
-                            warnings.warn(f"Skipping non-dataset item: {key}")
+                            warnings.warn(f"Skipping non-dataset item: {key}, {item}")
                     except Exception as e:
                         warnings.warn(f"Error reading dataset {key}: {str(e)}")
 
