@@ -161,8 +161,12 @@ class GCSAnnData:
         with self.fs.open(self.gcs_path, "rb") as f:
             with h5py.File(f, "r") as h5f:
                 if group_name in h5f.keys():
-                    if "_index" in h5f[group_name].attrs:
-                        return self._decode_string_array(h5f[group_name][h5f[group_name].attrs["_index"]][:])
+                    group = h5f[group_name]
+                    if "_index" in group.attrs:
+                        index_name = group.attrs["_index"]
+                        # Direct access to the dataset path
+                        index_dataset = h5f[f"{group_name}/{index_name}"]
+                        return self._decode_string_array(index_dataset[:])
                 return None
 
     def _get_dataframe(self, group_name):
