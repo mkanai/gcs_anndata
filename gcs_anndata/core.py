@@ -25,6 +25,10 @@ class GCSAnnData:
     ----------
     gcs_path : str
         Path to the h5ad file on GCS (e.g., 'gs://bucket/path/to/file.h5ad')
+    token : str, optional
+        Authentication token for Google Cloud Storage. Available options include:
+        None, 'google_default', 'cache', 'anon', 'browser', 'cloud', or a path to
+        a service account JSON file. See gcsfs documentation for details.
 
     Attributes
     ----------
@@ -53,7 +57,7 @@ class GCSAnnData:
         If the h5ad file does not contain an X matrix or if the shape cannot be inferred
     """
 
-    def __init__(self, gcs_path: str) -> None:
+    def __init__(self, gcs_path: str, token: str = None) -> None:
         """
         Initialize the GCSAnnData object.
 
@@ -61,9 +65,13 @@ class GCSAnnData:
         ----------
         gcs_path : str
             Path to the h5ad file on GCS (e.g., 'gs://bucket/path/to/file.h5ad')
+        token : str, optional
+            Authentication token for Google Cloud Storage. Available options include:
+            None, 'google_default', 'cache', 'anon', 'browser', 'cloud', or a path to
+            a service account JSON file. See gcsfs documentation for details.
         """
         self.gcs_path = gcs_path
-        self.fs = gcsfs.GCSFileSystem()
+        self.fs = gcsfs.GCSFileSystem(token=token)
         self.shape: Optional[Tuple[int, int]] = None
         self.sparse_format: Optional[str] = None
         self._initialize()
