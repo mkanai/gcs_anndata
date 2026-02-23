@@ -377,7 +377,7 @@ class GCSAnnData:
             data = np.array([], dtype=np.float32)
             indices_array = np.array([], dtype=np.int32)
 
-        indptr = np.array(all_indptr, dtype=np.int32)
+        indptr = np.array(all_indptr, dtype=np.int64)
 
         return data, indices_array, indptr
 
